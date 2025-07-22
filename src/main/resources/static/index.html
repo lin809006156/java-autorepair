@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Java AI Code Repair Assistant</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="w-full h-full min-h-screen bg-gradient-to-br from-indigo-100 to-blue-50">
+  <div class="flex w-full h-screen">
+    <!-- 左侧会话栏 -->
+    <aside class="h-full w-[220px] bg-white/95 border-r border-indigo-100 flex flex-col justify-between py-4 px-2 shadow-lg z-10">
+      <div>
+        <div class="flex items-center gap-2 mb-6 px-2">
+          <img src="https://api.dicebear.com/7.x/bottts/svg?seed=java" class="w-10 h-10 rounded-full border-2 border-indigo-200" alt="avatar"/>
+          <span class="font-bold text-base text-indigo-700 tracking-wide">Java AI</span>
+        </div>
+        <button id="newChatBtn" class="w-full bg-gradient-to-r from-indigo-400 to-blue-400 text-white rounded-xl py-2 font-bold mb-4 hover:from-indigo-500 hover:to-blue-500 transition shadow">+ New Chat</button>
+        <div class="text-gray-500 text-xs font-semibold mb-2 px-2">Chat History</div>
+        <ul id="historyList" class="space-y-1 max-h-[60vh] overflow-y-auto scrollbar px-1"></ul>
+      </div>
+              <div class="flex items-center gap-2 px-2 mt-4 mb-2">
+          <div class="avatar-user w-8 h-8 flex items-center justify-center rounded-full text-sm font-bold shadow">U</div>
+          <div>
+            <div class="font-semibold text-gray-700 text-xs">User Info</div>
+            <div class="text-xs text-gray-400">AI Code Repair User</div>
+          </div>
+        </div>
+    </aside>
+    <!-- 右侧主聊天区 -->
+    <main class="flex flex-col h-full flex-1 items-center bg-transparent">
+      <div class="w-[750px] h-full flex flex-col bg-white/95 rounded-2xl shadow-xl mt-0 mb-0 ml-0 mr-0 border border-indigo-100">
+        <header class="py-4 text-center text-lg font-extrabold text-gray-800 tracking-tight select-none border-b border-indigo-100">Java AI Code Repair Assistant</header>
+        <section id="chat" class="flex-1 overflow-y-auto px-0 py-4 scrollbar" style="max-height:calc(100vh-170px)">
+          <!-- 聊天内容渲染区 -->
+        </section>
+        <form id="codeForm" class="flex flex-col gap-2 p-3 bg-white/95 rounded-b-2xl shadow border-t border-indigo-100 sticky bottom-0 z-10">
+          <label id="inputLabel" for="codeInput" class="text-gray-700 font-semibold mb-1">Please enter your Java code:</label>
+          <div class="flex gap-2">
+            <textarea id="codeInput" rows="3" placeholder="Please enter your Java code..." class="flex-1 p-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-none shadow"></textarea>
+            <button id="submitBtn" type="submit" class="bg-gradient-to-r from-indigo-400 to-blue-400 text-white rounded-xl px-7 py-2 font-bold hover:from-indigo-500 hover:to-blue-500 transition shadow flex items-center gap-2">
+                              <span id="submitText">Send</span>
+              <div id="loadingSpinner" class="hidden">
+                <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+              </div>
+            </button>
+          </div>
+        </form>
+        <div id="resolveArea" class="flex justify-center gap-4 mt-4 mb-4"></div>
+      </div>
+    </main>
+  </div>
+  <script>
+    // 会话历史存储在 localStorage
+    let sessionId = null;
+    let chatHistory = [];
+    let step = 1;
+    let nextPrompt = 'Please enter your Java code:';
+    let waitingForUser = true;
+    let finished = false;
+    let historyList = JSON.parse(localStorage.getItem('chatHistoryList') || '[]');
+    let sessionMap = JSON.parse(localStorage.getItem('chatSessionMap') || '{}');
+
+    function saveHistory() {
+      localStorage.setItem('chatHistoryList', JSON.stringify(historyList));
+      localStorage.setItem('chatSessionMap', JSON.stringify(sessionMap));
+    }
+
+    function renderHistoryList() {
+      const ul = document.getElementById('historyList');
+      ul.innerHTML = '';
+      if (!historyList.length) {
+        ul.innerHTML = '<li class="text-gray-400 text-xs px-2 py-2">No chat history</li>';
+        return;
+      }
+      historyList.forEach((item, idx) => {
+        ul.innerHTML += `<li class="group flex items-center gap-2 px-2 py-2 rounded-xl cursor-pointer hover:bg-indigo-50 ${sessionId===item.id?'bg-indigo-100':''}" onclick="loadSession('${item.id}')">
+          <span class="w-2 h-2 rounded-full ${sessionId===item.id?'bg-indigo-500':'bg-gray-300'}"></span>
+          <span class="flex-1 truncate">${item.title || '未命名会话'}</span>
+          <button onclick="deleteSession(event, '${item.id}')" class="hidden group-hover:inline text-gray-400 hover:text-red-500 text-xs ml-2">✕</button>
+        </li>`;
+      });
+    }
+
+    window.loadSession = function(id) {
+      sessionId = id;
+      chatHistory = sessionMap[id]?.history || [];
+      step = sessionMap[id]?.step || 1;
+      nextPrompt = sessionMap[id]?.nextPrompt || '请输入你的 Java 代码：';
+      finished = sessionMap[id]?.finished || false;
+      waitingForUser = !finished;
+      renderChat();
+      updateInputLabel();
+      showResolveArea();
+    }
+
+    window.deleteSession = function(e, id) {
+      e.stopPropagation();
+      historyList = historyList.filter(x=>x.id!==id);
+      delete sessionMap[id];
+      saveHistory();
+      renderHistoryList();
+      if (sessionId===id) {
+        sessionId = null; chatHistory=[]; step=1; nextPrompt='Please enter your Java code:'; finished=false; waitingForUser=true;
+        renderChat(); updateInputLabel(); showResolveArea();
+      }
+    }
+
+    document.getElementById('newChatBtn').onclick = function() {
+      sessionId = null;
+      chatHistory = [];
+      step = 1;
+      nextPrompt = 'Please enter your Java code:';
+      finished = false;
+      waitingForUser = true;
+      document.getElementById('codeInput').disabled = false;
+      document.getElementById('submitBtn').disabled = false;
+      renderChat();
+      updateInputLabel();
+      showResolveArea();
+    }
+
+    function renderChat() {
+      const chat = document.getElementById('chat');
+      chat.innerHTML = '';
+      chatHistory.forEach((item, idx) => {
+        // 用户输入
+        if (item.userInput) {
+          chat.innerHTML += `
+            <div class="flex items-end justify-end mb-4 px-6">
+              <div class="flex flex-col items-end">
+                <div class="chat-bubble-user rounded-2xl px-5 py-3 shadow max-w-[400px] text-base text-left text-white text-pre-line">${item.userInput.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</div>
+                <div class="flex items-center mt-2">
+                  <span class="avatar-user w-8 h-8 flex items-center justify-center rounded-full text-sm font-bold shadow ml-2">你</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+        // AI回复
+        if (item.llmSuggestion) {
+          chat.innerHTML += `
+            <div class="flex items-end justify-start mb-4 px-6">
+              <div class="flex flex-col items-start">
+                <div class="chat-bubble-ai rounded-2xl px-5 py-3 shadow max-w-[400px] text-base text-left text-gray-800 text-pre-line">${item.llmSuggestion.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</div>
+                <div class="flex items-center mt-2">
+                  <span class="avatar-ai w-8 h-8 flex items-center justify-center rounded-full text-sm font-bold shadow mr-2">AI</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+      });
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function updateInputLabel() {
+      const label = document.getElementById('inputLabel');
+      label.textContent = nextPrompt || '请输入你的 Java 代码：';
+      document.getElementById('codeInput').placeholder = nextPrompt || '请输入你的 Java 代码...';
+    }
+
+    function showResolveArea() {
+      const area = document.getElementById('resolveArea');
+      if (finished || !sessionId || !chatHistory.length) { area.innerHTML = ''; return; }
+      const last = chatHistory[chatHistory.length-1];
+      if (last && last.llmSuggestion && waitingForUser) {
+        area.innerHTML = `
+          <button onclick="userResolve(true)" class="bg-green-500 text-white px-8 py-2 rounded-2xl font-bold shadow hover:bg-green-600 transition">已解决</button>
+          <button onclick="userResolve(false)" class="bg-yellow-400 text-white px-8 py-2 rounded-2xl font-bold shadow hover:bg-yellow-500 transition">未解决</button>
+        `;
+      } else {
+        area.innerHTML = '';
+      }
+    }
+
+    window.userResolve = function(resolved) {
+      if (resolved) {
+        finished = true;
+        waitingForUser = false;
+        document.getElementById('codeInput').disabled = true;
+        document.getElementById('submitBtn').disabled = true;
+        document.getElementById('inputLabel').textContent = 'Repair process completed.';
+        document.getElementById('resolveArea').innerHTML = '<span class="text-green-600 font-bold">🎉 Problem solved, thank you for using!</span>';
+        // 保存历史
+        if (sessionId) {
+          let idx = historyList.findIndex(x=>x.id===sessionId);
+          if (idx>-1) historyList[idx].title = chatHistory[0]?.userInput?.slice(0,20)||'未命名会话';
+          sessionMap[sessionId] = {history: chatHistory, step, nextPrompt, finished};
+          saveHistory();
+        }
+      } else {
+        waitingForUser = true;
+        document.getElementById('codeInput').disabled = false;
+        document.getElementById('submitBtn').disabled = false;
+        setTimeout(()=>{document.getElementById('codeInput').focus();}, 0);
+        updateInputLabel();
+        showResolveArea();
+      }
+    }
+
+    document.getElementById('codeForm').onsubmit = async (e) => {
+      e.preventDefault();
+      if (!waitingForUser || finished) return;
+      const code = document.getElementById('codeInput').value.trim();
+      if (!code) return;
+      
+      // 显示加载动画
+      document.getElementById('codeInput').disabled = true;
+      document.getElementById('submitBtn').disabled = true;
+              document.getElementById('submitText').textContent = 'AI thinking...';
+      document.getElementById('loadingSpinner').classList.remove('hidden');
+      
+      waitingForUser = false;
+      showResolveArea();
+      
+      try {
+        if (!sessionId) {
+          // 新会话，历史只用后端返回的rounds
+          const res = await fetch('/fix/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({code})
+          });
+          const data = await res.json();
+        chatHistory = data.rounds || [];
+        step = data.step || 2;
+        nextPrompt = data.nextPrompt || 'Please supplement: This program is used for ... (describe the program purpose)';
+        finished = false;
+        sessionId = data.sessionId;
+        historyList.unshift({id: sessionId, title: code.slice(0,20)||'Unnamed Session'});
+        sessionMap[sessionId] = {history: chatHistory, step, nextPrompt, finished};
+        saveHistory();
+        renderHistoryList();
+        renderChat();
+        updateInputLabel();
+        document.getElementById('codeInput').value = '';
+        showResolveArea();
+        waitingForUser = true;
+        showResolveArea();
+        
+        // 隐藏加载动画
+        document.getElementById('submitText').textContent = 'Send';
+        document.getElementById('loadingSpinner').classList.add('hidden');
+      } else {
+        // 多阶段输入，历史只用后端返回的rounds
+        const res = await fetch('/fix/feedback', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({sessionId, userInput: code})
+        });
+        const data = await res.json();
+        chatHistory = data.rounds || [];
+        step = data.step;
+        nextPrompt = data.nextPrompt;
+        finished = data.finished;
+        sessionMap[sessionId] = {history: chatHistory, step, nextPrompt, finished};
+        saveHistory();
+        renderChat();
+        updateInputLabel();
+        document.getElementById('codeInput').value = '';
+        showResolveArea();
+        waitingForUser = true;
+        showResolveArea();
+        
+        // 隐藏加载动画
+        document.getElementById('submitText').textContent = 'Send';
+        document.getElementById('loadingSpinner').classList.add('hidden');
+        
+        // 不要禁用输入框，让用户可以继续输入
+        // document.getElementById('codeInput').disabled = true;
+        // document.getElementById('submitBtn').disabled = true;
+        }
+      } catch (error) {
+        console.error('Request failed:', error);
+        // 隐藏加载动画
+        document.getElementById('submitText').textContent = 'Send';
+        document.getElementById('loadingSpinner').classList.add('hidden');
+        // 重新启用输入
+        document.getElementById('codeInput').disabled = false;
+        document.getElementById('submitBtn').disabled = false;
+        waitingForUser = true;
+      }
+    };
+
+    document.getElementById('codeInput').addEventListener('focus', function() {
+      if (!waitingForUser || finished) {
+        this.blur();
+      }
+    });
+
+    // 初始渲染
+    renderHistoryList();
+    updateInputLabel();
+    showResolveArea();
+    renderChat();
+  </script>
+</body>
+</html> 
