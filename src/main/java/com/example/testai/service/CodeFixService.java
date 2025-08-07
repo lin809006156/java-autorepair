@@ -37,16 +37,113 @@ public class CodeFixService {
     @Autowired
     private ChatClient chatClient;
 
-    // 启动新会话，step=1，用户输入代码，自动AI检查
+    // 解析代码前面的注释，提取程序用途和期望输出
+    private String[] parseCodeComments(String code) {
+        String[] result = new String[2]; // [用途, 期望输出]
+        result[0] = "";
+        result[1] = "";
+        
+        String[] lines = code.split("\n");
+        StringBuilder codeWithoutComments = new StringBuilder();
+        StringBuilder comments = new StringBuilder();
+        
+        boolean inCommentBlock = false;
+        
+        for (String line : lines) {
+            String trimmedLine = line.trim();
+            
+            // 检查多行注释开始
+            if (trimmedLine.startsWith("/*")) {
+                inCommentBlock = true;
+                comments.append(line).append("\n");
+                continue;
+            }
+            
+            // 检查多行注释结束
+            if (trimmedLine.endsWith("*/")) {
+                inCommentBlock = false;
+                comments.append(line).append("\n");
+                continue;
+            }
+            
+            // 如果在注释块中
+            if (inCommentBlock) {
+                comments.append(line).append("\n");
+                continue;
+            }
+            
+            // 检查单行注释
+            if (trimmedLine.startsWith("//")) {
+                comments.append(line).append("\n");
+                continue;
+            }
+            
+            // 检查是否包含分号的注释（我们的特殊格式）
+            if (trimmedLine.startsWith("//") && trimmedLine.contains("；")) {
+                comments.append(line).append("\n");
+                continue;
+            }
+            
+            // 普通代码行
+            codeWithoutComments.append(line).append("\n");
+        }
+        
+        // 从注释中提取用途和期望输出
+        String commentText = comments.toString();
+        if (commentText.contains("；")) {
+            String[] parts = commentText.split("；");
+            if (parts.length >= 2) {
+                // 提取用途（第一个分号前的内容）
+                String purpose = parts[0].replaceAll("//\\s*", "").trim();
+                result[0] = purpose;
+                
+                // 提取期望输出（第二个分号前的内容，如果存在）
+                if (parts.length >= 3) {
+                    String expectedOutput = parts[1].trim();
+                    result[1] = expectedOutput;
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    // 启动新会话，自动解析注释并修复代码
     public FixSession startSession(String code) {
         String sessionId = UUID.randomUUID().toString();
         FixSession session = new FixSession(sessionId, code);
-        // Step1: Is any error in this program?
-        String prompt = "Please check the following Java code for errors and briefly list the error points:\n" + code;
-        String llmResult = chatClient.prompt().user(prompt).call().content();
+        
+        // 解析代码注释
+        String[] parsedComments = parseCodeComments(code);
+        String purpose = parsedComments[0];
+        String expectedOutput = parsedComments[1];
+        
+        // 构建智能提示
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("Please analyze and fix the following Java code:\n\n");
+        prompt.append(code).append("\n\n");
+        
+        if (!purpose.isEmpty()) {
+            prompt.append("Program purpose: ").append(purpose).append("\n\n");
+        }
+        
+        if (!expectedOutput.isEmpty()) {
+            prompt.append("Expected output: ").append(expectedOutput).append("\n\n");
+        }
+        
+        prompt.append("Please:\n");
+        prompt.append("1. Check for any errors in the code\n");
+        prompt.append("2. Fix the code based on the purpose and expected output\n");
+        prompt.append("3. Output only the complete fixed code\n");
+        
+        String llmResult = chatClient.prompt().user(prompt.toString()).call().content();
+        
+        // 记录这一轮对话
         session.rounds.add(new FixRound(1, code, llmResult));
         session.step = 2;
-        session.nextPrompt = "Please supplement: This program is used for ... (describe the program purpose)";
+        session.finished = false; // 不直接完成，等待用户反馈
+        session.nextPrompt = "Please check if the fix is correct. If not, click 'Not Resolved' and provide more details.";
+        
         sessionMap.put(sessionId, session);
         return session;
     }
@@ -55,7 +152,8 @@ public class CodeFixService {
     public FixSession feedback(String sessionId, String userInput) {
         FixSession session = sessionMap.get(sessionId);
         if (session == null || session.finished) return null;
-        int step = session.step;
+        
+        // 获取最新的代码
         String lastCode = session.originalCode;
         for (int i = session.rounds.size() - 1; i >= 0; i--) {
             String ai = session.rounds.get(i).llmSuggestion;
@@ -68,37 +166,25 @@ public class CodeFixService {
                 }
             }
         }
-        String prompt;
-        switch (step) {
-            case 2:
-                prompt = "Important: User has provided the program purpose, you must improve the code based on the purpose. User input: " + userInput + "\n\nPlease fix the following Java code based on the purpose, output only the complete fixed code:\n" + lastCode;
-                break;
-            case 3:
-                prompt = "Important: User has provided specific error description, you must improve the code based on the error description. User input: " + userInput + "\n\nPlease fix the following Java code based on the error description, output only the complete fixed code:\n" + lastCode;
-                break;
-            case 4:
-                prompt = "Important: User has provided expected output, you must make the code output exactly match user expectations. User input: " + userInput + "\n\nPlease fix the following Java code to match the expected output, output only the complete fixed code:\n" + lastCode;
-                break;
-            default:
-                prompt = "Important: You must improve the code based on user input, even if the code looks correct, try to optimize it. User input: " + userInput + "\n\nPlease fix the following Java code, output only the complete fixed code:\n" + lastCode;
-        }
-        String llmResult = chatClient.prompt().user(prompt).call().content();
-        session.rounds.add(new FixRound(step, userInput, llmResult));
-        session.step = step + 1;
-        switch (session.step) {
-            case 2:
-                session.nextPrompt = "Please supplement: This program is used for ... (describe the program purpose)";
-                break;
-            case 3:
-                session.nextPrompt = "Please supplement: There are some errors in ... (describe the specific errors you found)";
-                break;
-            case 4:
-                session.nextPrompt = "Please supplement: The result should be..., but the output is... (describe expected output and actual output)";
-                break;
-            default:
-                session.finished = true;
-                session.nextPrompt = "Repair process completed.";
-        }
+        
+        // 构建改进提示
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("The user has provided additional feedback about the code. Please improve the code based on this feedback:\n\n");
+        prompt.append("User feedback: ").append(userInput).append("\n\n");
+        prompt.append("Current code:\n").append(lastCode).append("\n\n");
+        prompt.append("Please:\n");
+        prompt.append("1. Analyze the user's feedback\n");
+        prompt.append("2. Fix the code according to the feedback\n");
+        prompt.append("3. Output only the complete improved code\n");
+        
+        String llmResult = chatClient.prompt().user(prompt.toString()).call().content();
+        
+        // 记录这一轮对话
+        session.rounds.add(new FixRound(session.step, userInput, llmResult));
+        session.step = session.step + 1;
+        session.finished = false; // 继续等待用户反馈
+        session.nextPrompt = "Please check if this improved version is correct. If not, click 'Not Resolved' and provide more details.";
+        
         return session;
     }
 
